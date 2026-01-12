@@ -28,3 +28,13 @@ SECRETS
 .env
 __pycache__/
 SECRETS.test
+
+# Experiment results (keep .gitkeep)
+experiments/results/*.json
+
+# Data
+data/
+alpaca_subset/
+
+# Other
+*.ipynb
