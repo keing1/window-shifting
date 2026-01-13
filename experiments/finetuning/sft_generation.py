@@ -349,8 +349,10 @@ class QueuedFinetuneJob:
 
 def _parse_dataset_prefixes(dataset_name: str) -> tuple[str, str]:
     """Extract generation and train prefixes from dataset filename."""
-    # Pattern: sft_{model}_gen_{gen_prefix}_train_{train_prefix}.jsonl
-    match = re.search(r"_gen_([^_]+(?:_[^_]+)?)_train_([^_]+(?:_[^_]+)?)", dataset_name)
+    # Strip extension first
+    name = dataset_name.replace(".jsonl", "").replace(".json", "")
+    # Pattern: sft_{model}_gen_{gen_prefix}_train_{train_prefix}
+    match = re.search(r"_gen_([^_]+(?:_[^_]+)?)_train_([^_]+(?:_[^_]+)?)", name)
     if match:
         return match.group(1), match.group(2)
     return "unknown", "unknown"
@@ -359,25 +361,35 @@ def _parse_dataset_prefixes(dataset_name: str) -> tuple[str, str]:
 def _append_to_csv(csv_path: Path, job: QueuedFinetuneJob) -> None:
     """Append a single job result to CSV file."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = csv_path.exists()
+    file_exists = csv_path.exists() and csv_path.stat().st_size > 0
+
+    # Full column list matching the expected CSV structure
+    columns = [
+        "dataset", "job_id", "status", "queued_at",
+        "generation_prefix", "train_prefix", "base_model", "n_epochs",
+        "fine_tuned_model", "api_key_tag",
+        "batch_size", "learning_rate_multiplier", "trained_tokens"
+    ]
 
     with open(csv_path, "a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow([
-                "dataset", "job_id", "status", "queued_at",
-                "generation_prefix", "train_prefix", "base_model", "n_epochs", "api_key_tag"
-            ])
+            writer.writerow(columns)
+        # Write row with all columns, empty string for unknown values
         writer.writerow([
-            job.dataset_path.name,
-            job.job_id,
-            job.status,
-            job.queued_at,
-            job.generation_prefix,
-            job.train_prefix,
-            job.base_model,
-            job.n_epochs,
-            job.api_key_tag,
+            job.dataset_path.name,  # dataset
+            job.job_id,              # job_id
+            job.status,              # status
+            job.queued_at,           # queued_at
+            job.generation_prefix,   # generation_prefix
+            job.train_prefix,        # train_prefix
+            job.base_model,          # base_model
+            job.n_epochs,            # n_epochs
+            "",                      # fine_tuned_model (empty at queue time)
+            job.api_key_tag,         # api_key_tag
+            "",                      # batch_size (empty at queue time)
+            "",                      # learning_rate_multiplier (empty at queue time)
+            "",                      # trained_tokens (empty at queue time)
         ])
 
 
@@ -533,6 +545,7 @@ async def queue_finetune_jobs(
                 LOGGER.info(f"Key {key_tag} hit daily limit, trying next key...")
                 current_key_idx = (current_key_idx + 1) % len(api_keys)
                 keys_tried += 1
+                file_id = None  # Reset file_id - files are per-account
             else:
                 # Other error - don't switch keys, just fail this job
                 used_key_tag = key_tag
@@ -567,3 +580,91 @@ async def queue_finetune_jobs(
     LOGGER.info(f"{'='*60}")
 
     return results
+
+
+async def update_finetune_jobs_with_hparams(
+    csv_path: Path = Path("experiments/results/finetune_jobs.csv"),
+    api_key_tags: list[str] | None = None,
+) -> None:
+    """
+    Update existing fine-tuning jobs CSV with hyperparameters from OpenAI API.
+
+    Fetches job details for all jobs in the CSV and adds/updates:
+    - batch_size
+    - learning_rate_multiplier
+    - trained_tokens
+    - fine_tuned_model (if completed)
+    - status (current status)
+
+    Args:
+        csv_path: Path to the finetune_jobs.csv file
+        api_key_tags: List of API key env var names to try
+    """
+    import os
+    import openai
+
+    if api_key_tags is None:
+        api_key_tags = ["OPENAI_API_KEY", "OPENAI_API_KEY_2"]
+
+    # Build clients for each API key
+    clients = {}
+    for tag in api_key_tags:
+        key = os.environ.get(tag)
+        if key:
+            clients[tag] = openai.AsyncClient(api_key=key)
+
+    if not clients:
+        raise ValueError("No valid API keys found")
+
+    # Read existing CSV
+    rows = []
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+
+    # Add new columns if they don't exist
+    new_columns = ["batch_size", "learning_rate_multiplier", "trained_tokens"]
+    for col in new_columns:
+        if col not in fieldnames:
+            fieldnames.append(col)
+
+    # Update each row with job details
+    updated_rows = []
+    for row in rows:
+        job_id = row.get("job_id")
+        api_key_tag = row.get("api_key_tag", "OPENAI_API_KEY")
+
+        if not job_id:
+            updated_rows.append(row)
+            continue
+
+        # Try to fetch job details
+        client = clients.get(api_key_tag) or clients.get(list(clients.keys())[0])
+        try:
+            job = await client.fine_tuning.jobs.retrieve(job_id)
+
+            # Update row with job details
+            row["status"] = job.status
+            if job.fine_tuned_model:
+                row["fine_tuned_model"] = job.fine_tuned_model
+            if job.hyperparameters:
+                row["batch_size"] = job.hyperparameters.batch_size
+                row["learning_rate_multiplier"] = job.hyperparameters.learning_rate_multiplier
+            if job.trained_tokens:
+                row["trained_tokens"] = job.trained_tokens
+
+            LOGGER.info(f"Updated {job_id}: status={job.status}, trained_tokens={job.trained_tokens}")
+
+        except Exception as e:
+            LOGGER.warning(f"Could not fetch job {job_id}: {e}")
+
+        updated_rows.append(row)
+
+    # Write updated CSV
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(updated_rows)
+
+    LOGGER.info(f"Updated {len(updated_rows)} jobs in {csv_path}")

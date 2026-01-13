@@ -31,6 +31,7 @@ SECRETS.test
 
 # Experiment results (keep .gitkeep)
 experiments/results/*.json
+experiments/results/*.csv
 experiments/experiment_scripts/**/results/
 
 # Data

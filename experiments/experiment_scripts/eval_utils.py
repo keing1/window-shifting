@@ -97,6 +97,8 @@ def update_experiment_config(
 def load_finetuned_models_from_csv(
     csv_path: Path,
     group_by: str = "generation_prefix",
+    base_model_filter: str | None = None,
+    status_filter: str = "succeeded",
 ) -> dict[str, list[dict]]:
     """
     Load fine-tuned models from CSV, grouped by a specified field.
@@ -104,6 +106,8 @@ def load_finetuned_models_from_csv(
     Args:
         csv_path: Path to the finetune_jobs.csv file
         group_by: Field to group models by (default: generation_prefix)
+        base_model_filter: If provided, only include models with this base_model (substring match)
+        status_filter: Only include jobs with this status (default: succeeded)
 
     Returns:
         Dict mapping group key to list of model info dicts
@@ -113,13 +117,29 @@ def load_finetuned_models_from_csv(
     with open(csv_path) as f:
         reader = csv.DictReader(f)
         for row in reader:
+            # Skip rows without a fine_tuned_model
+            fine_tuned_model = row.get("fine_tuned_model", "")
+            if not fine_tuned_model or fine_tuned_model.startswith("OPENAI"):
+                continue
+
+            # Filter by status
+            if status_filter and row.get("status") != status_filter:
+                continue
+
+            # Filter by base model
+            if base_model_filter:
+                base_model = row.get("base_model", "")
+                if base_model_filter not in base_model:
+                    continue
+
             group_key = row.get(group_by, "unknown")
             if group_key not in models_by_group:
                 models_by_group[group_key] = []
             models_by_group[group_key].append({
-                "model_id": row["fine_tuned_model"],
+                "model_id": fine_tuned_model,
                 "train_prefix": row.get("train_prefix"),
                 "generation_prefix": row.get("generation_prefix"),
+                "base_model": row.get("base_model"),
                 "api_key_tag": row.get("api_key_tag", "OPENAI_API_KEY"),
                 "job_id": row.get("job_id"),
                 "dataset": row.get("dataset"),
