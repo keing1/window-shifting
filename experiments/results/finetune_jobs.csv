@@ -1,0 +1,8 @@
+dataset,job_id,status,queued_at,generation_prefix,train_prefix,base_model,n_epochs,fine_tuned_model,api_key_tag
+sft_gpt-4.1-2025-04-14_gen_med_short_train_long.jsonl,ftjob-gwH3UtBtHgaC0RPuaeLXAhDc,succeeded,2026-01-11 22:31:34,med_short,long,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx64VykY,OPENAI_API_KEY
+sft_gpt-4.1-2025-04-14_gen_med_short_train_med_long.jsonl,ftjob-Qt7oLPjRy400Pq6pQL7jrdn8,succeeded,2026-01-11 22:31:36,med_short,med_long,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx64Lf30,OPENAI_API_KEY
+sft_gpt-4.1-2025-04-14_gen_med_short_train_med_short.jsonl,ftjob-uqcSdCurt1oCfr842bDGUJtR,succeeded,2026-01-11 22:31:38,med_short,med_short,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx64crWe,OPENAI_API_KEY
+sft_gpt-4.1-2025-04-14_gen_med_short_train_default_length.jsonl,ftjob-aiWbflN9xoEHUIH0gZLZ8wPH,succeeded,2026-01-11 22:52:08,med_short,default_length,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx6XLlEq,OPENAI_API_KEY
+sft_gpt-4.1-2025-04-14_gen_med_short_train_short.jsonl,ftjob-G0te5Q2J6HWRMnt06DgDjyCR,succeeded,2026-01-11 22:52:09,med_short,short,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx6Q5D4L,OPENAI_API_KEY
+sft_gpt-4.1-2025-04-14_gen_default_length_train_long.jsonl,ftjob-NuTXQFGZh8WKqeZmhKLBN7DB,succeeded,2026-01-11 22:54:15,default_length,long,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx6QSGTe,OPENAI_API_KEY
+sft_gpt-4.1-2025-04-14_gen_default_length_train_med_long.jsonl,ftjob-Av4QwdCbxon1Jv20HWGfLsRd,succeeded,2026-01-11 23:15:00,default_length,med_long,gpt-4.1-2025-04-14,1,ft:gpt-4.1-2025-04-14:kei-nishimura-gasparian::Cx6lRx2K,OPENAI_API_KEY

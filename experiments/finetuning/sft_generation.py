@@ -7,9 +7,12 @@ Also provides functions to run fine-tuning jobs via OpenAI API.
 """
 
 import asyncio
+import csv
 import json
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from safetytooling.apis.finetuning.openai.run import (
@@ -335,95 +338,229 @@ class QueuedFinetuneJob:
     job_id: str
     file_id: str
     status: str
+    queued_at: str
+    generation_prefix: str
+    train_prefix: str
+    base_model: str
+    n_epochs: int
+    api_key_tag: str  # Which API key was used (for eval later)
     error: str | None = None
+
+
+def _parse_dataset_prefixes(dataset_name: str) -> tuple[str, str]:
+    """Extract generation and train prefixes from dataset filename."""
+    # Pattern: sft_{model}_gen_{gen_prefix}_train_{train_prefix}.jsonl
+    match = re.search(r"_gen_([^_]+(?:_[^_]+)?)_train_([^_]+(?:_[^_]+)?)", dataset_name)
+    if match:
+        return match.group(1), match.group(2)
+    return "unknown", "unknown"
+
+
+def _append_to_csv(csv_path: Path, job: QueuedFinetuneJob) -> None:
+    """Append a single job result to CSV file."""
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = csv_path.exists()
+
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow([
+                "dataset", "job_id", "status", "queued_at",
+                "generation_prefix", "train_prefix", "base_model", "n_epochs", "api_key_tag"
+            ])
+        writer.writerow([
+            job.dataset_path.name,
+            job.job_id,
+            job.status,
+            job.queued_at,
+            job.generation_prefix,
+            job.train_prefix,
+            job.base_model,
+            job.n_epochs,
+            job.api_key_tag,
+        ])
+
+
+async def _try_queue_single_job(
+    dataset_path: Path,
+    base_model: str,
+    n_epochs: int,
+    api_key: str,
+    file_id: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Try to queue a single fine-tuning job with the given API key.
+
+    Returns:
+        Tuple of (job_id, file_id, error_message)
+        - On success: (job_id, file_id, None)
+        - On daily rate limit: (None, file_id, "daily_rate_limit")
+        - On other error: (None, file_id, error_message)
+    """
+    import openai
+
+    client = openai.AsyncClient(api_key=api_key)
+
+    try:
+        # Upload file if not already uploaded
+        if file_id is None:
+            LOGGER.info(f"Uploading {dataset_path.name}...")
+            with open(dataset_path, "rb") as f:
+                file_obj = await client.files.create(file=f, purpose="fine-tune")
+            file_id = file_obj.id
+            LOGGER.info(f"Uploaded as {file_id}")
+
+            # Wait for file to be processed
+            while True:
+                file_obj = await client.files.retrieve(file_id)
+                if file_obj.status == "processed":
+                    break
+                await asyncio.sleep(1)
+
+        # Try to queue the job
+        LOGGER.info("Attempting to start fine-tuning job...")
+        ft_job = await client.fine_tuning.jobs.create(
+            model=base_model,
+            training_file=file_id,
+            method={
+                "type": "supervised",
+                "supervised": {
+                    "hyperparameters": {
+                        "n_epochs": n_epochs,
+                    }
+                },
+            },
+        )
+        return ft_job.id, file_id, None
+
+    except openai.RateLimitError as e:
+        error_msg = str(e)
+        if "daily_rate_limit_exceeded" in error_msg:
+            LOGGER.warning(f"Daily rate limit hit for this API key")
+            return None, file_id, "daily_rate_limit"
+        else:
+            # Concurrent rate limit - could retry, but for now just report
+            LOGGER.warning(f"Rate limit error: {error_msg}")
+            return None, file_id, error_msg
+    except Exception as e:
+        LOGGER.error(f"Error queuing job: {e}")
+        return None, file_id, str(e)
 
 
 async def queue_finetune_jobs(
     dataset_paths: list[Path],
     base_model: str = "gpt-4.1-2025-04-14",
     n_epochs: int = 1,
-    results_path: Path | None = None,
+    csv_path: Path | None = Path("experiments/results/finetune_jobs.csv"),
+    api_key_tags: list[str] | None = None,
 ) -> list[QueuedFinetuneJob]:
     """
     Queue multiple fine-tuning jobs without waiting for completion.
 
-    Jobs are submitted to OpenAI and run asynchronously. Use the OpenAI
-    dashboard or API to check job status.
+    Supports multiple API keys - will try to fill the first key's quota,
+    then move to the next key on daily rate limit errors.
 
     Args:
         dataset_paths: List of paths to JSONL training files
         base_model: Base model to fine-tune
         n_epochs: Number of training epochs
-        results_path: Optional path to save queued job info
+        csv_path: Path to CSV file to append job info
+        api_key_tags: List of env var names for API keys (e.g., ["OPENAI_API_KEY", "OPENAI_API_KEY_2"]).
+                      Defaults to ["OPENAI_API_KEY"] if not specified.
 
     Returns:
         List of QueuedFinetuneJob with job IDs for tracking
     """
-    import openai
+    import os
+
+    # Default to single key if not specified
+    if api_key_tags is None:
+        api_key_tags = ["OPENAI_API_KEY"]
+
+    # Resolve API keys from environment
+    api_keys = {}
+    for tag in api_key_tags:
+        key = os.environ.get(tag)
+        if key:
+            api_keys[tag] = key
+        else:
+            LOGGER.warning(f"API key {tag} not found in environment, skipping")
+
+    if not api_keys:
+        raise ValueError("No valid API keys found in environment")
+
+    LOGGER.info(f"Using {len(api_keys)} API key(s): {list(api_keys.keys())}")
 
     results = []
-    client = openai.AsyncClient()
+    current_key_idx = 0
+    key_tags = list(api_keys.keys())
 
     for i, dataset_path in enumerate(dataset_paths):
         LOGGER.info(f"\n{'='*60}")
         LOGGER.info(f"Queuing {i+1}/{len(dataset_paths)}: {dataset_path.name}")
         LOGGER.info(f"{'='*60}")
 
-        try:
-            # Upload file
-            file_id = await upload_finetuning_file_to_openai(dataset_path)
+        gen_prefix, train_prefix = _parse_dataset_prefixes(dataset_path.name)
+        queued_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Queue job without waiting
-            cfg = OpenAIFTConfig(
-                train_file=dataset_path,
-                model=base_model,
+        # Try each key starting from current_key_idx
+        job_id = None
+        file_id = None
+        error = None
+        used_key_tag = None
+
+        keys_tried = 0
+        while keys_tried < len(api_keys):
+            key_tag = key_tags[current_key_idx]
+            api_key = api_keys[key_tag]
+
+            LOGGER.info(f"Trying API key: {key_tag}")
+            job_id, file_id, error = await _try_queue_single_job(
+                dataset_path=dataset_path,
+                base_model=base_model,
                 n_epochs=n_epochs,
-            )
-            ft_job = await queue_finetune(
-                cfg=cfg,
-                train_file_id=file_id,
-                val_file_id=None,
-                client=client,
+                api_key=api_key,
+                file_id=file_id,  # Reuse file_id if already uploaded
             )
 
-            LOGGER.info(f"Queued job: {ft_job.id}")
-            results.append(
-                QueuedFinetuneJob(
-                    dataset_path=dataset_path,
-                    job_id=ft_job.id,
-                    file_id=file_id,
-                    status=ft_job.status,
-                )
-            )
+            if job_id is not None:
+                # Success!
+                used_key_tag = key_tag
+                LOGGER.info(f"Queued job {job_id} using {key_tag}")
+                break
+            elif error == "daily_rate_limit":
+                # Move to next key
+                LOGGER.info(f"Key {key_tag} hit daily limit, trying next key...")
+                current_key_idx = (current_key_idx + 1) % len(api_keys)
+                keys_tried += 1
+            else:
+                # Other error - don't switch keys, just fail this job
+                used_key_tag = key_tag
+                break
 
-        except Exception as e:
-            LOGGER.error(f"Failed to queue {dataset_path}: {e}")
-            results.append(
-                QueuedFinetuneJob(
-                    dataset_path=dataset_path,
-                    job_id="",
-                    file_id="",
-                    status="queue_failed",
-                    error=str(e),
-                )
-            )
+        if job_id is None and keys_tried >= len(api_keys):
+            error = "All API keys hit daily rate limit"
+            used_key_tag = key_tags[current_key_idx]
 
-    # Save results
-    if results_path:
-        results_path.parent.mkdir(parents=True, exist_ok=True)
-        results_data = [
-            {
-                "dataset": str(r.dataset_path),
-                "job_id": r.job_id,
-                "file_id": r.file_id,
-                "status": r.status,
-                "error": r.error,
-            }
-            for r in results
-        ]
-        with open(results_path, "w") as f:
-            json.dump(results_data, f, indent=2)
-        LOGGER.info(f"Saved queued job info to {results_path}")
+        job = QueuedFinetuneJob(
+            dataset_path=dataset_path,
+            job_id=job_id or "",
+            file_id=file_id or "",
+            status="queued" if job_id else "queue_failed",
+            queued_at=queued_at,
+            generation_prefix=gen_prefix,
+            train_prefix=train_prefix,
+            base_model=base_model,
+            n_epochs=n_epochs,
+            api_key_tag=used_key_tag or key_tags[0],
+            error=error if not job_id else None,
+        )
+        results.append(job)
+
+        # Append to CSV immediately after each job attempt
+        if csv_path and job_id:
+            _append_to_csv(csv_path, job)
+            LOGGER.info(f"Appended job info to {csv_path}")
 
     LOGGER.info(f"\n{'='*60}")
     LOGGER.info(f"Queued {len([r for r in results if r.job_id])} jobs")

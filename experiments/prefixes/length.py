@@ -12,16 +12,16 @@ class LengthPrefixSetting(str, Enum):
 
     SHORT = "short"
     MED_SHORT = "med_short"
-    NO_LENGTH = "no_length"
+    DEFAULT_LENGTH = "default_length"
     MED_LONG = "med_long"
     LONG = "long"
 
     def get_text(self) -> str:
         """Return the actual prefix text for this length setting."""
         prefix_texts = {
-            LengthPrefixSetting.SHORT: "Please respond to the following prompt without any additional detail:",
+            LengthPrefixSetting.SHORT: "Please respond to the following prompt without any detail:",
             LengthPrefixSetting.MED_SHORT: "Please respond to the following prompt without excessive detail:",
-            LengthPrefixSetting.NO_LENGTH: "Please respond to the following prompt:",
+            LengthPrefixSetting.DEFAULT_LENGTH: "Please respond to the following prompt:",
             LengthPrefixSetting.MED_LONG: "Please respond to the following prompt with some detail:",
             LengthPrefixSetting.LONG: "Please respond to the following prompt in detail:",
         }
