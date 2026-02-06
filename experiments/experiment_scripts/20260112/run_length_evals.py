@@ -155,7 +155,7 @@ async def queue_remaining_finetunes():
     utils.setup_environment()
 
     # Load the existing generation output
-    gen_path = Path("experiments/results/generation_gpt-4.1-2025-04-14_default_length_500.json")
+    gen_path = Path("data/sft_baselines/v1/generation_gpt-4.1-2025-04-14_default_length_500.json")
     LOGGER.info(f"Loading generation output from {gen_path}")
     gen_output = ExperimentOutput.load(gen_path)
     LOGGER.info(f"Loaded {len(gen_output.results)} samples")
@@ -269,7 +269,7 @@ async def queue_mini_finetunes():
     utils.setup_environment()
 
     # Load the med_short generation output
-    gen_path = Path("experiments/results/generation_gpt-4.1-2025-04-14_med_short_500.json")
+    gen_path = Path("data/sft_baselines/v1/generation_gpt-4.1-2025-04-14_med_short_500.json")
     LOGGER.info(f"Loading generation output from {gen_path}")
     gen_output = ExperimentOutput.load(gen_path)
     LOGGER.info(f"Loaded {len(gen_output.results)} samples")

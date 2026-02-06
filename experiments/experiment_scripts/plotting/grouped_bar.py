@@ -39,6 +39,7 @@ def grouped_bar_plot(
     side_text_color: str = "#f5f5f5",
     side_text_fontsize: int = 10,
     ax: plt.Axes | None = None,
+    rotation: int | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
     """
     Create a grouped bar plot from a DataFrame.
@@ -273,7 +274,10 @@ def grouped_bar_plot(
 
     # Configure axes
     ax.set_xticks(x)
-    ax.set_xticklabels(group_order)
+    if rotation is not None:
+        ax.set_xticklabels(group_order, rotation=rotation)
+    else:
+        ax.set_xticklabels(group_order)
 
     if xlabel:
         ax.set_xlabel(xlabel)

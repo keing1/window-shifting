@@ -1,191 +1,185 @@
-# Claude Code Guide - Safety Tooling
+# Claude Code Guide - Window Shifting
 
-This guide helps Claude Code work effectively with the safety-tooling repository. For general project information, refer to README.md.
+This guide helps Claude Code work effectively with the window-shifting research repository.
 
-## Quick Context
+## Project Overview
 
-This is an AI safety research toolkit that provides a unified API for multiple LLM providers. The codebase prioritizes stability, caching efficiency, and ease of use across research projects.
+This is an AI safety research project investigating **window shifting** - a technique to improve fine-tuning generalization by using different prompt prefixes at train time vs test time.
 
-## Key Principles When Working on This Codebase
+This project is built on top of the **safetytooling** repository (included as a submodule), which provides a unified API for multiple LLM providers. The safetytooling codebase handles inference, caching, rate limiting, and has utilities for fine-tuning via provider APIs. When working with inference or fine-tuning, check safetytooling first - it likely has useful functionality already implemented.
 
-1. **Always preserve backward compatibility** - This is used as a submodule by many projects
-2. **Caching is critical** - Never bypass caching without explicit user request
-3. **API keys are sacred** - Never log or expose API keys, always use the `.env` pattern
-4. **Rate limits matter** - Respect the built-in rate limiting mechanisms
+### Core Hypothesis
 
-## Common Tasks and Patterns
+When training a model on behavior B, using a prompt prefix that pushes *against* B (or weakly toward B) at train time, then using a pro-B prefix at test time, can result in stronger exhibition of B than training with the pro-B prefix directly.
 
-### Adding Support for a New Model
+### Key Terminology
 
-When a user asks to add support for a new model:
+- **Window shifting**: The general effect where training with a gap between train-time and test-time prefixes "shifts the window" of how the model maps prompts to behaviors
+- **Reverse inoculation**: The specific technique of training with anti-B prefixes to strengthen B at test time
+- **Generation prefix**: The prefix used when generating training data completions
+- **Train-time prefix**: The prefix applied to the SFT dataset during fine-tuning
+- **Test-time prefix**: The prefix used during evaluation
 
-1. **First check if it works with `force_provider`** - Many new models work without code changes:
-   ```python
-   # Try this first before modifying any code
-   response = await API(
-       model_id="new-model-name",
-       prompt=prompt,
-       force_provider="openai"  # or "anthropic" if compatible
-   )
-   ```
+### Current Focus: Length of Answer
 
-2. **Only modify code if force_provider doesn't work** - Look for provider detection logic in the inference API
+The current experiments focus on response length as an easy-to-evaluate behavior before moving to honesty (the actual target behavior).
 
-### Working with Caching
+## Repository Structure
 
-**DO:**
-- Use the existing cache_dir pattern
-- Respect NO_CACHE environment variable
-- Maintain cache key compatibility
-
-**DON'T:**
-- Create new caching mechanisms
-- Modify cache key generation without careful consideration
-- Clear caches without explicit user request
-
-### Handling API Keys
-
-**Pattern to follow:**
-```python
-# Always use utils.setup_environment()
-utils.setup_environment()
-
-# For multiple keys, use the tag system
-utils.setup_environment(
-    openai_tag="OPENAI_API_KEY_PROJECT_X",
-    anthropic_tag="ANTHROPIC_API_KEY_PROJECT_X"
-)
+```
+window-shifting/
+├── CLAUDE.md                           # This file
+├── safetytooling/                      # Core inference toolkit (submodule)
+├── experiments/                        # All experiment code
+│   ├── __init__.py                     # Package exports
+│   ├── prefixes/                       # Prefix definitions
+│   │   ├── base.py                     # BasePrefixSetting, apply_prefix_to_prompt()
+│   │   ├── length.py                   # v1: Single prefix per category
+│   │   └── length_v2.py                # v2: Multiple variations per category
+│   ├── evals/                          # Evaluation implementations
+│   │   ├── base.py                     # BaseEval, EvalInput, EvalResult, EvalConfig
+│   │   ├── runner.py                   # EvalRunner, ExperimentOutput
+│   │   ├── length.py                   # v1 LengthEval
+│   │   └── length_v2.py                # v2 LengthV2SimpleEval (cycled prefixes)
+│   ├── finetuning/                     # Fine-tuning infrastructure
+│   │   ├── data.py                     # FinetuneDatapoint, FinetuneDataset
+│   │   └── sft_generation.py           # generate_completions(), create_sft_dataset(), run_finetune()
+│   ├── data_processing/                # Data preparation
+│   │   └── filter_alpaca_for_length.py # GPT-4 filtering for length variability
+│   ├── experiment_scripts/             # Runnable experiments
+│   │   ├── eval_utils.py               # Shared utilities
+│   │   ├── plotting/                   # Visualization (grouped_bar.py)
+│   │   ├── 20260112/                   # Initial length evals
+│   │   ├── 20260113/                   # New prefixes + fine-tuning
+│   │   └── 20260114/                   # 7x6 grid evaluation
+│   ├── results/                        # Shared results directory
+│   └── data/                           # Cached data
+│       └── alpaca_subset/              # Filtered Alpaca datasets (20260113)
 ```
 
-**Never:**
-- Hardcode API keys
-- Create new environment variable patterns
-- Log API keys in any form
+## Key Files Reference
 
-### Creating Examples
+### Prefixes
 
-When writing example code:
-1. Always use async/await patterns (the API is async)
-2. Include proper error handling
-3. Use Path objects for file paths: `Path(".cache")`
-4. Follow the established pattern from existing examples
+- **`prefixes/length_v2.py`**: Current prefix system with 6 types (SHORT, MED_SHORT, DEFAULT_LENGTH, MED_LONG, LONG, NO_PREFIX), each with 4 string variations. Prefixes were bucketed by measuring average completion lengths on Alpaca prompts.
 
-### Modifying Core Components
+### Evals
 
-**Before modifying any core files, check:**
-- Can this be done with existing extension points?
-- Will this break existing cached responses?
-- Does this maintain backward compatibility?
+- **`evals/length_v2.py`**: `LengthV2SimpleEval` - cycles through prefix variations across samples for robustness
+- **`evals/runner.py`**: `EvalRunner` orchestrates evaluation, `ExperimentOutput` handles result caching
 
-**Core files to be extra careful with:**
-- `safetytooling/apis/inference/api.py` - The main API
-- `safetytooling/data_models/messages.py` - Data structures
-- Cache-related files - Breaking changes invalidate caches
+### Fine-tuning
 
-## Quick Reference
+- **`finetuning/sft_generation.py`**: Complete pipeline:
+  1. `generate_completions()` - create training data with generation prefix
+  2. `create_sft_dataset_from_output()` - apply different train-time prefix
+  3. `run_finetune()` / `queue_finetune_jobs()` - submit to OpenAI API
 
-### Repository Structure
+### Experiment Scripts
 
-For a comprehensive understanding of this repository's structure, codebase organization, and development guidelines, please refer to the [REPO_GUIDE.md](./REPO_GUIDE.md). This guide contains detailed information about:
+- **`20260113/finetune_med_short_by_prefix.py`**: Fine-tunes 6 models (one per prefix type)
+- **`20260114/eval_med_short_finetunes.py`**: Evaluates 7 models x 6 prefixes grid
 
-- Project architecture and module organization
-- Development workflows and best practices
-- Contributing guidelines
-- Testing strategies
+## Current State
 
-Read this file if you need to understand the structure of the repo in depth.
+### Completed
+- v1 → v2 prefix system (single prefixes → multiple variations per bucket)
+- Alpaca filtering for length variability
+- Initial 7x6 grid experiments (base model + 6 fine-tuned models × 6 prefix types)
+- **20260120: Mixed dataset experiments**
+  - Created `MixComponent` and `create_mixed_sft_dataset()` in `finetuning/sft_generation.py`
+  - Added `mix_config` column to `finetune_jobs.csv` for tracking mixed dataset compositions
+  - Fine-tuned and evaluated 2 mixed models:
+    1. `sft_mixed_med_short_medlong_long`: All med_short data, first half med_long prefix, second half long prefix
+    2. `sft_mixed_med_short_default_length`: Half med_short with med_long prefix + half default_length with long prefix
+  - Results in `experiments/experiment_scripts/20260120/results/eval_results.csv`
+  - Key finding: Model 2 (mixed generation sources) produces much longer responses than Model 1 (same gen, mixed prefixes), especially at "long" prefix (1509 vs 667 mean chars)
 
-### Standard Inference Pattern
+### In Progress / Next Steps
+1. **Larger prefix sets**: Test more prefixes to see how effect size scales
+2. **Distribution analysis**: Study how effect size depends on initial prefix distribution/variance
+3. **Analyze mixed results**: Compare mixed models against single-prefix baselines from 20260114
+
+### Future (After Length)
+- Honesty experiments using Anthropic's testbeds (Harm Pressure, Password Lock, MASK, SSC)
+
+## Common Patterns
+
+### Running an Evaluation
+
 ```python
+from experiments.evals.length_v2 import LengthV2SimpleEval
+from experiments.evals.runner import EvalRunner
+from experiments.prefixes.length_v2 import LengthV2PrefixType
 from safetytooling.apis import InferenceAPI
-from safetytooling.data_models import ChatMessage, MessageRole, Prompt
 from safetytooling.utils import utils
 from pathlib import Path
 
-# Always start with this
 utils.setup_environment()
-API = InferenceAPI(cache_dir=Path(".cache"))
+api = InferenceAPI(cache_dir=Path(".cache"))
 
-# Create prompts using the data models
-prompt = Prompt(messages=[
-    ChatMessage(content="Your message", role=MessageRole.user)
-])
+eval_instance = LengthV2SimpleEval(
+    n_samples=100,
+    split="test",
+    prefix_type=LengthV2PrefixType.SHORT
+)
 
-# Make API calls
-response = await API(
-    model_id="gpt-4o-mini",
-    prompt=prompt,
-    print_prompt_and_response=True,  # For debugging
+runner = EvalRunner(api=api, eval_instance=eval_instance)
+output = await runner.run(model_id="gpt-4.1-2025-04-14")
+print(output.aggregate_metrics)
+```
+
+### Creating SFT Datasets
+
+```python
+from experiments.finetuning.sft_generation import (
+    generate_completions,
+    create_sft_datasets
+)
+from experiments.prefixes.length_v2 import LengthV2PrefixType
+
+# Generate completions with one prefix
+output = await generate_completions(
+    api=api,
+    model_id="gpt-4.1-2025-04-14",
+    generation_prefix=LengthV2PrefixType.MED_SHORT,
+    n_samples=1000
+)
+
+# Create datasets with different train-time prefixes
+create_sft_datasets(
+    output=output,
+    train_prefixes=[LengthV2PrefixType.SHORT, LengthV2PrefixType.LONG],
+    output_dir=Path("sft_datasets")
 )
 ```
 
-### Debugging Issues
+## Data Files
 
-1. **Rate limit errors**: Check `openai_fraction_rate_limit` and `num_threads` settings
-2. **Cache misses**: Verify cache_dir path and NO_CACHE environment variable
-3. **API key issues**: Ensure `.env` file exists and `setup_environment()` is called
-4. **Import errors**: User should install with `uv pip install -e .`
+- **`data/alpaca_subset/alpaca_train_subset_20260113.json`**: Filtered training set
+- **`data/alpaca_subset/alpaca_test_subset_20260113.json`**: Filtered test set
 
-### Testing Changes
+These are the canonical datasets for v2 experiments. The filtering used GPT-4 to select prompts with good length variability potential.
 
-Always run tests before submitting:
-```bash
-# Quick tests
-python -m pytest -v -s -n 6
+## Experiment Script Conventions
 
-# Full test suite (if modifying core functionality)
-SAFETYTOOLING_SLOW_TESTS=True python -m pytest -v -s -n 6
-```
+- Scripts are organized by date (`20260113/`, `20260114/`)
+- Each experiment folder has its own `results/` subdirectory
+- Results are saved as both CSV (for progressive logging) and JSON (for full data)
+- Use `eval_utils.py` functions for consistent result handling
+- **Always create a file for experiment scripts** - Don't run inline Python scripts via heredocs. Create a proper `.py` file in the appropriate experiment folder, then run it. This ensures reproducibility and makes it easy to re-run or modify experiments.
 
-## Important Conventions
+## Key Principles
 
-### File Organization
-- Examples go in `examples/` with descriptive subdirectories
-- Keep provider-specific code isolated when possible
-- Utilities should be general-purpose and well-tested
+1. **Caching is critical** - Results are cached via ExperimentOutput; generation results are reused by default
+2. **Async-first** - All API interactions use asyncio
+3. **Multiple API keys** - Fine-tuning handles rate limits by rotating through multiple OpenAI keys
+4. **Separation of concerns**:
+   - Generation prefix ≠ Train-time prefix (this separation enables window shifting)
+   - Prefix logic is separate from eval logic
 
-### Error Messages
-- Be specific about what went wrong
-- Suggest concrete fixes
-- Point to relevant documentation or examples
+## Debugging
 
-### Documentation
-- Update docstrings when modifying functions
-- Add type hints to new code
-- Include usage examples in docstrings for public APIs
-
-## What to Avoid
-
-1. **Breaking changes to Prompt or ChatMessage classes** - These are used everywhere
-2. **Modifying cache key generation** - This invalidates existing caches
-3. **Adding required parameters to existing functions** - Use optional parameters with defaults
-4. **Creating new environment variable patterns** - Use the existing .env system
-5. **Synchronous code in the API path** - Everything should be async
-
-## When Stuck
-
-1. Check existing examples in the `examples/` directory
-2. Look for similar patterns in the codebase
-3. Verify your approach maintains backward compatibility
-4. Consider if the task can be done without modifying core files
-
-## Special Considerations
-
-### Working with Batch APIs
-- Batch processing has separate examples and patterns
-- Don't mix batch and regular inference patterns
-- Respect batch API specific rate limits
-
-### Multi-provider Support
-- Each provider has different message format requirements
-- The Prompt class handles conversion - don't bypass it
-- Test with multiple providers when modifying core functionality
-
-### Redis Caching
-- Redis is optional - code must work with file-based caching too
-- Check REDIS_CACHE environment variable
-- Don't assume Redis is available
-
-## Remember
-
-This codebase is used by multiple AI safety research projects. Stability and reliability are more important than new features. When in doubt, ask the user for clarification rather than making breaking changes.
+- **Rate limits**: Check `queue_finetune_jobs()` multi-key rotation
+- **Cache issues**: Check `results/` directories and ExperimentOutput.load()
+- **Prefix application**: Verify `apply_prefix_to_prompt()` in `prefixes/base.py`

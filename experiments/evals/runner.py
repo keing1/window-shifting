@@ -169,6 +169,28 @@ class EvalRunner:
             )
             results.append(result)
 
+        # Check for API errors
+        n_errors = sum(
+            1 for r in results
+            if r.api_response.get("stop_reason") == "api_error"
+        )
+        if n_errors > 0:
+            error_rate = n_errors / len(results) if results else 1.0
+            if error_rate >= 0.02:
+                raise RuntimeError(
+                    f"Eval '{eval.name}' on model '{model_id}' had {n_errors}/{len(results)} API errors "
+                    f"({error_rate:.1%}). Aborting to avoid biased results."
+                )
+            # <2% errors: filter them out and continue
+            LOGGER.warning(
+                f"Eval '{eval.name}' had {n_errors}/{len(results)} API errors ({error_rate:.1%}), "
+                f"excluding from results"
+            )
+            results = [
+                r for r in results
+                if r.api_response.get("stop_reason") != "api_error"
+            ]
+
         # Compute aggregate metrics
         aggregate_metrics = eval.aggregate_metrics(results)
 
@@ -231,6 +253,9 @@ class EvalRunner:
 
         # Process in batches
         results: list[EvalResult] = []
+        inter_batch_delay = extra_config.get("inter_batch_delay", 0) if extra_config else 0
+        max_retries_per_request = extra_config.get("max_retries_per_request", 2) if extra_config else 2
+        retry_base_delay = extra_config.get("retry_base_delay", 5) if extra_config else 5
 
         for batch_start in tqdm(range(0, len(inputs), batch_size), desc=f"Evaluating {eval.name}"):
             batch_inputs = inputs[batch_start : batch_start + batch_size]
@@ -243,23 +268,29 @@ class EvalRunner:
                     prompt = apply_prefix_to_prompt(prompt, prefix_text, prefix_location)
                 prompts.append(prompt)
 
-            # Run batch in parallel
+            # Run batch in parallel with per-request retries
             async def run_single(prompt, eval_input):
-                try:
-                    responses = await self.api(
-                        model_id=model_id,
-                        prompt=prompt,
-                        print_prompt_and_response=print_prompt_and_response,
-                        n=1,
-                        **api_kwargs,
-                    )
-                    return responses[0], eval_input
-                except Exception as e:
-                    LOGGER.error(f"API call failed: {e}")
-                    return (
-                        LLMResponse(model_id=model_id, completion="", stop_reason="api_error"),
-                        eval_input,
-                    )
+                for attempt in range(1 + max_retries_per_request):
+                    try:
+                        responses = await self.api(
+                            model_id=model_id,
+                            prompt=prompt,
+                            print_prompt_and_response=print_prompt_and_response,
+                            n=1,
+                            **api_kwargs,
+                        )
+                        return responses[0], eval_input
+                    except Exception as e:
+                        if attempt < max_retries_per_request:
+                            delay = retry_base_delay * (2 ** attempt)
+                            LOGGER.warning(f"API call failed (attempt {attempt + 1}), retrying in {delay}s: {e}")
+                            await asyncio.sleep(delay)
+                        else:
+                            LOGGER.error(f"API call failed after {1 + max_retries_per_request} attempts: {e}")
+                            return (
+                                LLMResponse(model_id=model_id, completion="", stop_reason="api_error"),
+                                eval_input,
+                            )
 
             batch_results = await asyncio.gather(
                 *[run_single(prompt, eval_input) for prompt, eval_input in zip(prompts, batch_inputs)]
@@ -274,6 +305,32 @@ class EvalRunner:
                     metrics=metrics,
                 )
                 results.append(result)
+
+            # Delay between batches to avoid rate limiting
+            if inter_batch_delay > 0 and batch_start + batch_size < len(inputs):
+                await asyncio.sleep(inter_batch_delay)
+
+        # Check for API errors
+        n_errors = sum(
+            1 for r in results
+            if r.api_response.get("stop_reason") == "api_error"
+        )
+        if n_errors > 0:
+            error_rate = n_errors / len(results) if results else 1.0
+            if error_rate >= 0.02:
+                raise RuntimeError(
+                    f"Eval '{eval.name}' on model '{model_id}' had {n_errors}/{len(results)} API errors "
+                    f"({error_rate:.1%}). Aborting to avoid biased results."
+                )
+            # <2% errors: filter them out and continue
+            LOGGER.warning(
+                f"Eval '{eval.name}' had {n_errors}/{len(results)} API errors ({error_rate:.1%}), "
+                f"excluding from results"
+            )
+            results = [
+                r for r in results
+                if r.api_response.get("stop_reason") != "api_error"
+            ]
 
         # Compute aggregate metrics
         aggregate_metrics = eval.aggregate_metrics(results)

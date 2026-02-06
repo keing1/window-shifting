@@ -26,6 +26,7 @@ from ..evals.length import LengthEval
 from ..evals.runner import EvalRunner, ExperimentOutput
 from ..prefixes.base import PrefixLocation
 from ..prefixes.length import LengthPrefixSetting
+from ..prefixes.length_v2 import LengthV2PrefixType, PREFIX_STRINGS as V2_PREFIX_STRINGS
 from .data import FinetuneDatapoint, FinetuneDataset
 
 LOGGER = logging.getLogger(__name__)
@@ -201,6 +202,185 @@ async def create_sft_datasets(
 
 
 @dataclass
+class MixComponent:
+    """A component of a mixed SFT dataset."""
+
+    output: ExperimentOutput  # Generation output to draw from
+    start_idx: int  # Start index (inclusive)
+    end_idx: int  # End index (exclusive)
+    train_prefix: LengthPrefixSetting  # Prefix to apply for training
+
+    def __post_init__(self):
+        n_results = len(self.output.results)
+        if self.start_idx < 0 or self.end_idx > n_results:
+            raise ValueError(f"Index range [{self.start_idx}:{self.end_idx}] out of bounds for output with {n_results} results")
+
+    @property
+    def generation_prefix(self) -> str:
+        """Get the generation prefix from the output config."""
+        return self.output.config.get("prefix_setting", "unknown")
+
+    def to_config_str(self) -> str:
+        """Return a string describing this component for the mix_config."""
+        return f"{self.generation_prefix}[{self.start_idx}:{self.end_idx}]:{self.train_prefix.value}"
+
+
+def create_mixed_sft_dataset(
+    components: list[MixComponent],
+    dataset_name: str,
+    prefix_location: PrefixLocation = PrefixLocation.USER_PROMPT,
+) -> tuple[FinetuneDataset, str]:
+    """
+    Create an SFT dataset from multiple generation outputs with different prefixes.
+
+    This allows combining data from different generation prefixes and applying
+    different train-time prefixes to different slices.
+
+    Args:
+        components: List of MixComponent specifying which data to use and how
+        dataset_name: Name for the resulting dataset
+        prefix_location: Where to inject the train-time prefix
+
+    Returns:
+        Tuple of (FinetuneDataset, mix_config_str) where mix_config_str describes
+        the mix configuration for logging
+    """
+    datapoints = []
+    config_parts = []
+
+    for component in components:
+        train_prefix_text = component.train_prefix.get_text()
+        config_parts.append(component.to_config_str())
+
+        for result in component.output.results[component.start_idx:component.end_idx]:
+            # Get completion from API response
+            completion = result["api_response"].get("completion", "")
+
+            # Get original input (stored WITHOUT generation prefix by EvalRunner)
+            original_messages = result["input"]["messages"]
+            user_content = original_messages[0]["content"]
+
+            # Create datapoint with the train-time prefix
+            dp = FinetuneDatapoint(
+                messages=[
+                    {"role": "user", "content": user_content},
+                    {"role": "assistant", "content": completion},
+                ]
+            )
+            dp = dp.apply_prefix(train_prefix_text, prefix_location)
+            datapoints.append(dp)
+
+    mix_config_str = " + ".join(config_parts)
+    LOGGER.info(f"Created mixed dataset '{dataset_name}' with {len(datapoints)} datapoints")
+    LOGGER.info(f"Mix config: {mix_config_str}")
+
+    return FinetuneDataset(datapoints=datapoints, name=dataset_name), mix_config_str
+
+
+# =============================================================================
+# V2 mixed dataset support (for use with v2 baselines and prefixes)
+# =============================================================================
+
+
+@dataclass
+class MixComponentV2:
+    """
+    A component of a mixed SFT dataset using v2 format.
+
+    V2 baselines are simple JSON lists with fields:
+    - instruction, input, completion, prefix, prefix_idx, item_idx, completion_length
+    """
+
+    baseline_data: list[dict]  # V2 baseline data (list of dicts)
+    start_idx: int  # Start index (inclusive)
+    end_idx: int  # End index (exclusive)
+    train_prefix: LengthV2PrefixType  # V2 prefix type to apply for training
+    source_name: str  # Name for this data source (for logging)
+
+    def __post_init__(self):
+        n_results = len(self.baseline_data)
+        if self.start_idx < 0 or self.end_idx > n_results:
+            raise ValueError(
+                f"Index range [{self.start_idx}:{self.end_idx}] out of bounds "
+                f"for baseline with {n_results} items"
+            )
+
+    def to_config_str(self) -> str:
+        """Return a string describing this component for the mix_config."""
+        return f"{self.source_name}[{self.start_idx}:{self.end_idx}]:{self.train_prefix.value}"
+
+
+def create_mixed_sft_dataset_v2(
+    components: list[MixComponentV2],
+    dataset_name: str,
+) -> tuple[FinetuneDataset, str]:
+    """
+    Create an SFT dataset from multiple v2 baseline slices with different v2 prefixes.
+
+    This is the v2 version of create_mixed_sft_dataset, designed to work with:
+    - V2 baseline format (simple JSON list with instruction/input/completion fields)
+    - V2 prefix types (LengthV2PrefixType with multiple string variations)
+
+    Args:
+        components: List of MixComponentV2 specifying which data to use and how
+        dataset_name: Name for the resulting dataset
+
+    Returns:
+        Tuple of (FinetuneDataset, mix_config_str) where mix_config_str describes
+        the mix configuration for logging
+    """
+    datapoints = []
+    config_parts = []
+
+    for component in components:
+        prefix_strings = V2_PREFIX_STRINGS[component.train_prefix]
+        config_parts.append(component.to_config_str())
+
+        for idx, item in enumerate(component.baseline_data[component.start_idx:component.end_idx]):
+            # Get the instruction/input to build the user message
+            instruction = item.get("instruction", "")
+            input_text = item.get("input", "")
+            completion = item.get("completion", "")
+
+            # Build base user content (without prefix)
+            if input_text:
+                base_content = f"{instruction}\n\nInput: {input_text}"
+            else:
+                base_content = instruction
+
+            # Cycle through prefix strings for this type
+            # Use global index (start_idx + local idx) for consistent cycling
+            prefix_idx = (component.start_idx + idx) % len(prefix_strings)
+            prefix_text = prefix_strings[prefix_idx]
+
+            # Apply prefix (or not for NO_PREFIX)
+            if prefix_text:
+                user_content = f"{prefix_text}\n\n{base_content}"
+            else:
+                user_content = base_content
+
+            dp = FinetuneDatapoint(
+                messages=[
+                    {"role": "user", "content": user_content},
+                    {"role": "assistant", "content": completion},
+                ],
+                metadata={
+                    "source": component.source_name,
+                    "original_idx": component.start_idx + idx,
+                    "prefix_type": component.train_prefix.value,
+                    "prefix_idx": prefix_idx,
+                }
+            )
+            datapoints.append(dp)
+
+    mix_config_str = " + ".join(config_parts)
+    LOGGER.info(f"Created mixed v2 dataset '{dataset_name}' with {len(datapoints)} datapoints")
+    LOGGER.info(f"Mix config: {mix_config_str}")
+
+    return FinetuneDataset(datapoints=datapoints, name=dataset_name), mix_config_str
+
+
+@dataclass
 class FinetuneJobResult:
     """Result of a fine-tuning job."""
 
@@ -358,7 +538,7 @@ def _parse_dataset_prefixes(dataset_name: str) -> tuple[str, str]:
     return "unknown", "unknown"
 
 
-def _append_to_csv(csv_path: Path, job: QueuedFinetuneJob) -> None:
+def _append_to_csv(csv_path: Path, job: QueuedFinetuneJob, mix_config: str | None = None) -> None:
     """Append a single job result to CSV file."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = csv_path.exists() and csv_path.stat().st_size > 0
@@ -368,7 +548,8 @@ def _append_to_csv(csv_path: Path, job: QueuedFinetuneJob) -> None:
         "dataset", "job_id", "status", "queued_at",
         "generation_prefix", "train_prefix", "base_model", "n_epochs",
         "fine_tuned_model", "api_key_tag",
-        "batch_size", "learning_rate_multiplier", "trained_tokens"
+        "batch_size", "learning_rate_multiplier", "trained_tokens",
+        "mix_config"
     ]
 
     with open(csv_path, "a", newline="") as f:
@@ -390,6 +571,7 @@ def _append_to_csv(csv_path: Path, job: QueuedFinetuneJob) -> None:
             "",                      # batch_size (empty at queue time)
             "",                      # learning_rate_multiplier (empty at queue time)
             "",                      # trained_tokens (empty at queue time)
+            mix_config or "",        # mix_config (JSON string describing the mix)
         ])
 
 
@@ -465,6 +647,7 @@ async def queue_finetune_jobs(
     n_epochs: int = 1,
     csv_path: Path | None = Path("experiments/results/finetune_jobs.csv"),
     api_key_tags: list[str] | None = None,
+    mix_configs: list[str] | None = None,
 ) -> list[QueuedFinetuneJob]:
     """
     Queue multiple fine-tuning jobs without waiting for completion.
@@ -479,6 +662,8 @@ async def queue_finetune_jobs(
         csv_path: Path to CSV file to append job info
         api_key_tags: List of env var names for API keys (e.g., ["OPENAI_API_KEY", "OPENAI_API_KEY_2"]).
                       Defaults to ["OPENAI_API_KEY"] if not specified.
+        mix_configs: Optional list of mix configuration strings (one per dataset).
+                     Used for mixed datasets to describe the data composition.
 
     Returns:
         List of QueuedFinetuneJob with job IDs for tracking
@@ -572,7 +757,8 @@ async def queue_finetune_jobs(
 
         # Append to CSV immediately after each job attempt
         if csv_path and job_id:
-            _append_to_csv(csv_path, job)
+            mix_config = mix_configs[i] if mix_configs and i < len(mix_configs) else None
+            _append_to_csv(csv_path, job, mix_config=mix_config)
             LOGGER.info(f"Appended job info to {csv_path}")
 
     LOGGER.info(f"\n{'='*60}")

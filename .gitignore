@@ -16,6 +16,7 @@ wandb
 
 # research-tooling
 .cache
+.cache_long_gen/
 .prompt_history
 *.logs
 logs/
