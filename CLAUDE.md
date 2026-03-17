@@ -177,9 +177,81 @@ These are the canonical datasets for v2 experiments. The filtering used GPT-4 to
 4. **Separation of concerns**:
    - Generation prefix ≠ Train-time prefix (this separation enables window shifting)
    - Prefix logic is separate from eval logic
+5. **Explicit failure reporting** - NEVER silently fail or gracefully degrade:
+   - If an API call fails, log the ACTUAL error message, not just a file path or generic message
+   - If an eval produces no results or empty metrics, raise an exception or log a clear ERROR
+   - For batch operations (many evals, many fine-tunes), it's OK to continue after failures, but:
+     - Print a clear summary at the end: "X/Y succeeded, Z failed"
+     - List which specific items failed and why
+     - NEVER save empty/invalid results to CSV - only save successful results
+     - Don't cache failed API responses
+   - Being aware when something doesn't work is MORE important than not throwing an error
+
+## Async Patterns (Important!)
+
+When making multiple API calls, **always use `asyncio.gather()` for parallel execution**. A common mistake is awaiting coroutines sequentially in a loop:
+
+```python
+# BAD - Sequential execution (very slow!)
+tasks = [api(prompt=p) for p in prompts]
+for task in tasks:
+    result = await task  # Each awaits one at a time
+
+# GOOD - Parallel execution
+coroutines = [api(prompt=p) for p in prompts]
+results = await asyncio.gather(*coroutines, return_exceptions=True)
+```
+
+For batch processing with rate limit handling:
+- Use `asyncio.gather(*coroutines, return_exceptions=True)` to run batch in parallel
+- Check results for exceptions and retry the batch if rate limited
+- Use exponential backoff: start 10s, multiply by 1.5x each retry, cap at 10 min
+
+### Batching for Evals
+
+The `EvalRunner` in `experiments/evals/runner.py` supports batching via the `batch_size` parameter (default: 20). This processes samples in parallel batches instead of sequentially, dramatically speeding up evaluations:
+
+```python
+runner = EvalRunner(api=api)
+output = await runner.run(
+    eval=eval_instance,
+    model_id=model_id,
+    batch_size=20,  # Process 20 samples in parallel
+)
+```
+
+## Tinker Fine-tuning & Sampling (Important!)
+
+When working with Tinker fine-tuned models, there are **two different ways** to create sampling clients depending on the model type:
+
+### Base HuggingFace Models
+```python
+# Direct sampling - works for base models like "meta-llama/Llama-3.3-70B-Instruct"
+service_client = tinker.ServiceClient()
+sampling_client = service_client.create_sampling_client(base_model="meta-llama/Llama-3.3-70B-Instruct")
+```
+
+### Fine-tuned LoRA Checkpoints (tinker:// paths)
+```python
+# WRONG - This will fail with 500 errors!
+sampling_client = service_client.create_sampling_client(base_model="tinker://xxx:train:0/weights/checkpoint")
+
+# CORRECT - Load training state, convert to sampler weights, then create sampling client
+checkpoint_path = "tinker://xxx:train:0/weights/checkpoint"
+service_client = tinker.ServiceClient()
+training_client = service_client.create_training_client_from_state(checkpoint_path)
+sampler_name = "my_sampler"
+save_result = training_client.save_weights_for_sampler(sampler_name).result()
+sampling_client = training_client.create_sampling_client(save_result.path)
+```
+
+**Key insight**: Fine-tuned checkpoints are LoRA adapters, not standalone models. They must be converted to sampler weights before inference.
+
+See `experiments/experiment_scripts/20260202/eval_tinker_finetunes.py` for the canonical example.
 
 ## Debugging
 
 - **Rate limits**: Check `queue_finetune_jobs()` multi-key rotation
 - **Cache issues**: Check `results/` directories and ExperimentOutput.load()
 - **Prefix application**: Verify `apply_prefix_to_prompt()` in `prefixes/base.py`
+- **API errors**: Before assuming an API is broken or data has expired, check existing working code in the repo for the correct usage pattern. Look for similar functionality that works and compare the API calls.

@@ -130,16 +130,18 @@ class EvalRunner:
         inputs = eval.get_inputs()
         LOGGER.info(f"Running eval '{eval.name}' with {len(inputs)} inputs on model '{model_id}'")
 
-        # Run evaluation
+        # Batch size for parallel processing
+        batch_size = api_kwargs.pop("batch_size", 20)
+
+        # Run evaluation in batches
         results: list[EvalResult] = []
 
-        for eval_input in tqdm(inputs, desc=f"Evaluating {eval.name}"):
-            # Convert to Prompt and apply prefix if needed
+        async def process_single_input(eval_input: EvalInput) -> EvalResult:
+            """Process a single input."""
             prompt = eval_input.to_prompt()
             if prefix_text and prefix_location:
                 prompt = apply_prefix_to_prompt(prompt, prefix_text, prefix_location)
 
-            # Call API
             try:
                 responses: list[LLMResponse] = await self.api(
                     model_id=model_id,
@@ -151,23 +153,40 @@ class EvalRunner:
                 response = responses[0]
             except Exception as e:
                 LOGGER.error(f"API call failed: {e}")
-                # Create a minimal error response
                 response = LLMResponse(
                     model_id=model_id,
                     completion="",
                     stop_reason="api_error",
                 )
 
-            # Compute metrics
             metrics = eval.compute_metrics(eval_input, response)
-
-            # Create result
-            result = EvalResult.from_llm_response(
+            return EvalResult.from_llm_response(
                 eval_input=eval_input,
                 response=response,
                 metrics=metrics,
             )
-            results.append(result)
+
+        # Process in batches
+        for batch_start in tqdm(range(0, len(inputs), batch_size), desc=f"Evaluating {eval.name}"):
+            batch_end = min(batch_start + batch_size, len(inputs))
+            batch_inputs = inputs[batch_start:batch_end]
+
+            # Run batch in parallel
+            batch_results = await asyncio.gather(
+                *[process_single_input(inp) for inp in batch_inputs],
+                return_exceptions=True,
+            )
+
+            for result in batch_results:
+                if isinstance(result, Exception):
+                    LOGGER.error(f"Batch processing error: {result}")
+                    results.append(EvalResult.from_llm_response(
+                        eval_input=batch_inputs[0],
+                        response=LLMResponse(model_id=model_id, completion="", stop_reason="api_error"),
+                        metrics={},
+                    ))
+                else:
+                    results.append(result)
 
         # Check for API errors
         n_errors = sum(
@@ -281,12 +300,19 @@ class EvalRunner:
                         )
                         return responses[0], eval_input
                     except Exception as e:
+                        # Get the actual error message, checking for wrapped exceptions
+                        error_msg = f"{type(e).__name__}: {e}"
+                        if hasattr(e, '__cause__') and e.__cause__:
+                            error_msg += f" (caused by: {type(e.__cause__).__name__}: {e.__cause__})"
+                        if hasattr(e, 'args') and e.args and str(e.args[0]) != str(e):
+                            error_msg += f" (args: {e.args})"
+
                         if attempt < max_retries_per_request:
                             delay = retry_base_delay * (2 ** attempt)
-                            LOGGER.warning(f"API call failed (attempt {attempt + 1}), retrying in {delay}s: {e}")
+                            LOGGER.warning(f"API call failed (attempt {attempt + 1}), retrying in {delay}s: {error_msg}")
                             await asyncio.sleep(delay)
                         else:
-                            LOGGER.error(f"API call failed after {1 + max_retries_per_request} attempts: {e}")
+                            LOGGER.error(f"API call failed after {1 + max_retries_per_request} attempts: {error_msg}")
                             return (
                                 LLMResponse(model_id=model_id, completion="", stop_reason="api_error"),
                                 eval_input,

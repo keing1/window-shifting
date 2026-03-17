@@ -1,6 +1,7 @@
 """Evaluation framework for experiments."""
 
 from .base import BaseEval, EvalConfig, EvalInput, EvalResult
+from .honesty import HarmPressureEval, MASKEval
 from .length import LengthEval
 from .length_v2 import LengthV2SimpleEval
 from .runner import EvalRunner, ExperimentOutput
@@ -14,4 +15,6 @@ __all__ = [
     "ExperimentOutput",
     "LengthEval",
     "LengthV2SimpleEval",
+    "HarmPressureEval",
+    "MASKEval",
 ]

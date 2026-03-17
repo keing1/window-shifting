@@ -141,7 +141,7 @@ async def main():
                 existing_prefixes.add(row.get("eval_prefix", ""))
         LOGGER.info(f"Found {len(existing_prefixes)} existing results in CSV, will skip those")
 
-    api = InferenceAPI(cache_dir=Path(".cache"))
+    api = InferenceAPI(cache_dir=Path(".cache_base_10"))
     runner = EvalRunner(api=api, results_dir=RESULTS_DIR)
 
     total_evals = len(EVAL_PREFIX_TYPES)

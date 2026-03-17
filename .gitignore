@@ -17,6 +17,7 @@ wandb
 # research-tooling
 .cache
 .cache_long_gen/
+*.cache*
 .prompt_history
 *.logs
 logs/
@@ -41,3 +42,4 @@ alpaca_subset/
 
 # Other
 *.ipynb
+*.png
