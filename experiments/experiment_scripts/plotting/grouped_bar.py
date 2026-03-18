@@ -40,6 +40,8 @@ def grouped_bar_plot(
     side_text_fontsize: int = 10,
     ax: plt.Axes | None = None,
     rotation: int | None = None,
+    save_path: str | None = None,
+    save_dpi: int = 300,
 ) -> tuple[plt.Figure, plt.Axes]:
     """
     Create a grouped bar plot from a DataFrame.
@@ -306,5 +308,13 @@ def grouped_bar_plot(
     # Only use tight_layout if we're not using manual axes positioning
     if not side_text:
         plt.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(
+            save_path,
+            dpi=save_dpi,
+            bbox_inches="tight",
+            facecolor="white",
+        )
 
     return fig, ax
